@@ -653,6 +653,8 @@ func cpuinit() {
 //	call runtime·mstart
 //
 // The new G calls runtime·main.
+// 调度器初始化
+// 包含了m的创建，p的初始化
 func schedinit() {
 	lockInit(&sched.lock, lockRankSched)
 	lockInit(&sched.sysmonlock, lockRankSysmon)
@@ -676,11 +678,14 @@ func schedinit() {
 
 	// raceinit must be the first call to race detector.
 	// In particular, it must be done before mallocinit below calls racemapshadow.
+
+	// 获取当前g
 	_g_ := getg()
 	if raceenabled {
 		_g_.racectx, raceprocctx0 = raceinit()
 	}
 
+	// m的最大数量，默认一万
 	sched.maxmcount = 10000
 
 	// The world starts stopped.
@@ -692,6 +697,8 @@ func schedinit() {
 	cpuinit()      // must run before alginit
 	alginit()      // maps, hash, fastrand must not be used before this call
 	fastrandinit() // must run before mcommoninit
+
+	// 比较关键的是这个，初始化m
 	mcommoninit(_g_.m, -1)
 	modulesinit()   // provides activeModules
 	typelinksinit() // uses maps, activeModules
@@ -713,10 +720,15 @@ func schedinit() {
 
 	lock(&sched.lock)
 	sched.lastpoll = uint64(nanotime())
+
+	// 这里就能看出来了
+	// p的多少，由cpu核数跟GOMAXPROCS 有关
 	procs := ncpu
 	if n, ok := atoi32(gogetenv("GOMAXPROCS")); ok && n > 0 {
 		procs = n
 	}
+
+	// p 的初始化
 	if procresize(procs) != nil {
 		throw("unknown runnable goroutine during bootstrap")
 	}
@@ -781,6 +793,7 @@ func mReserveID() int64 {
 }
 
 // Pre-allocated ID may be passed as 'id', or omitted by passing -1.
+// 深入看之前的认识：M 是系统线程，这里应该是创建系统线程吧
 func mcommoninit(mp *m, id int64) {
 	_g_ := getg()
 
@@ -810,6 +823,8 @@ func mcommoninit(mp *m, id int64) {
 		mp.fastrand = uint64(hi)<<32 | uint64(lo)
 	}
 
+	// 看描述，是用于创建 M，还有分配内存，但是没看到底下的实现
+	// 全局搜了一下，发现有很多种实现
 	mpreinit(mp)
 	if mp.gsignal != nil {
 		mp.gsignal.stackguard1 = mp.gsignal.stack.lo + _StackGuard

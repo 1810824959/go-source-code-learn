@@ -250,13 +250,17 @@ func (h *hmap) newoverflow(t *maptype, b *bmap) *bmap {
 		// See makeBucketArray for more details.
 		ovf = h.extra.nextOverflow
 		if ovf.overflow(t) == nil {
+			// 说明不是溢出桶的最后一个
 			// We're not at the end of the preallocated overflow buckets. Bump the pointer.
 			h.extra.nextOverflow = (*bmap)(add(unsafe.Pointer(ovf), uintptr(t.bucketsize)))
 		} else {
+			// 说明是最后一个
 			// This is the last preallocated overflow bucket.
 			// Reset the overflow pointer on this bucket,
 			// which was set to a non-nil sentinel value.
 			ovf.setoverflow(t, nil)
+
+			// 这一步说明，溢出桶也用完了
 			h.extra.nextOverflow = nil
 		}
 	} else {
@@ -308,14 +312,18 @@ func makemap(t *maptype, hint int, h *hmap) *hmap {
 	}
 
 	// initialize Hmap
+	// 创建map
 	if h == nil {
 		h = new(hmap)
 	}
+
+	// hash因子
 	h.hash0 = fastrand()
 
 	// Find the size parameter B which will hold the requested # of elements.
 	// For hint < 0 overLoadFactor returns false since hint < bucketCnt.
 	B := uint8(0)
+	// 得到 能容纳hint的最小桶数量，不仅是2的次方，而且还要有6.5的扩容因子
 	for overLoadFactor(hint, B) {
 		B++
 	}
@@ -326,6 +334,8 @@ func makemap(t *maptype, hint int, h *hmap) *hmap {
 	// If hint is large zeroing this memory could take a while.
 	if h.B != 0 {
 		var nextOverflow *bmap
+
+		// 分配 bucket与 溢出桶
 		h.buckets, nextOverflow = makeBucketArray(t, h.B, nil)
 		if nextOverflow != nil {
 			h.extra = new(mapextra)
@@ -347,6 +357,9 @@ func makeBucketArray(t *maptype, b uint8, dirtyalloc unsafe.Pointer) (buckets un
 	nbuckets := base
 	// For small b, overflow buckets are unlikely.
 	// Avoid the overhead of the calculation.
+
+	// 桶的数量，超过2的4次，说明很可能用到溢出桶
+	// 额外创建 2的（B-4）个溢出桶
 	if b >= 4 {
 		// Add on the estimated number of overflow buckets
 		// required to insert the median number of elements
@@ -374,6 +387,8 @@ func makeBucketArray(t *maptype, b uint8, dirtyalloc unsafe.Pointer) (buckets un
 		}
 	}
 
+	// 一开始 base 赋值了nbuckets
+	// 一旦出现不同，说明是走到了上面的大B情况，预创建了一些额外桶
 	if base != nbuckets {
 		// We preallocated some overflow buckets.
 		// To keep the overhead of tracking these overflow buckets to a minimum,
@@ -384,6 +399,7 @@ func makeBucketArray(t *maptype, b uint8, dirtyalloc unsafe.Pointer) (buckets un
 		last := (*bmap)(add(buckets, (nbuckets-1)*uintptr(t.bucketsize)))
 		last.setoverflow(t, (*bmap)(buckets))
 	}
+	// 只是分配了内存，其他没干嘛
 	return buckets, nextOverflow
 }
 
@@ -414,6 +430,8 @@ func mapaccess1(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
 	if h.flags&hashWriting != 0 {
 		throw("concurrent map read and map write")
 	}
+
+	// 获得hash函数
 	hash := t.hasher(key, uintptr(h.hash0))
 	m := bucketMask(h.B)
 	b := (*bmap)(add(h.buckets, (hash&m)*uintptr(t.bucketsize)))
@@ -654,6 +672,10 @@ bucketloop:
 
 	// If we hit the max load factor or we have too many overflow buckets,
 	// and we're not already in the middle of growing, start growing.
+
+	// 扩容
+	// 触发条件是
+	// 1）现在并不是扩容状态  2）
 	if !h.growing() && (overLoadFactor(h.count+1, h.B) || tooManyOverflowBuckets(h.noverflow, h.B)) {
 		hashGrow(t, h)
 		goto again // Growing the table invalidates everything, so try again
