@@ -1406,6 +1406,7 @@ func mstart0() {
 func mstart1() {
 	_g_ := getg()
 
+	// 这一步会检查，是不是在g0上，保证了后面的schedule是在g0的
 	if _g_ != _g_.m.g0 {
 		throw("bad runtime·mstart")
 	}
@@ -1416,16 +1417,21 @@ func mstart1() {
 	// so other calls can reuse the current frame.
 	// And goexit0 does a gogo that needs to return from mstart1
 	// and let mstart0 exit the thread.
+
+	// 設置了g0 的sched，但是为什么在这里设置？不懂
 	_g_.sched.g = guintptr(unsafe.Pointer(_g_))
 	_g_.sched.pc = getcallerpc()
 	_g_.sched.sp = getcallersp()
 
 	asminit()
+	// 看注释，就是初始化一个new m
 	minit()
 
 	// Install signal handlers; after minit so that minit can
 	// prepare the thread to be able to handle the signals.
 	if _g_.m == &m0 {
+		// 又针对m0做了点操作
+		// 但是我，不太懂m0的作用
 		mstartm0()
 	}
 
@@ -1437,6 +1443,7 @@ func mstart1() {
 		acquirep(_g_.m.nextp.ptr())
 		_g_.m.nextp = 0
 	}
+	// 进入主菜，schedule
 	schedule()
 }
 
@@ -2416,6 +2423,8 @@ func wakep() {
 	if atomic.Load(&sched.nmspinning) != 0 || !atomic.Cas(&sched.nmspinning, 0, 1) {
 		return
 	}
+
+	// 启动一个m，或者干脆创建一个
 	startm(nil, true)
 }
 
@@ -2494,7 +2503,7 @@ func gcstopm() {
 }
 
 // Schedules gp to run on the current M.
-// If inheritTime is true, gp inherits the remaining time in the
+// If  inheritTimeis true, gp inherits the remaining time in the
 // current time slice. Otherwise, it starts a new time slice.
 // Never returns.
 //
@@ -2507,8 +2516,12 @@ func execute(gp *g, inheritTime bool) {
 
 	// Assign gp.m before entering _Grunning so running Gs have an
 	// M.
+
+	// 这里_g_ 指的是g0，每一个M都有一个g0，只负责调度，不执行任务
 	_g_.m.curg = gp
+	// newg 的m也设置成当前m
 	gp.m = _g_.m
+	// 调整goroutine状态
 	casgstatus(gp, _Grunnable, _Grunning)
 	gp.waitsince = 0
 	gp.preempt = false
@@ -3123,6 +3136,8 @@ func injectglist(glist *gList) {
 
 // One round of scheduler: find a runnable goroutine and execute it.
 // Never returns.
+// 看注释，找到一个可执行的goroutine，并执行它
+// 思考了下，在前面已经有过newproc，所以当前p 的runnext上，是有goroutine的
 func schedule() {
 	_g_ := getg()
 
@@ -3187,6 +3202,9 @@ top:
 		// Check the global runnable queue once in a while to ensure fairness.
 		// Otherwise two goroutines can completely occupy the local runqueue
 		// by constantly respawning each other.
+		// 这个schedtick 的含义看一下 ： schedtick   uint32     // incremented on every scheduler call
+		// 每次调度，就会自增，那就是每61次，就会从全局中获取一次
+		// 防止全局队列中的goroutine一直不被调到
 		if _g_.m.p.ptr().schedtick%61 == 0 && sched.runqsize > 0 {
 			lock(&sched.lock)
 			gp = globrunqget(_g_.m.p.ptr(), 1)
@@ -3194,11 +3212,14 @@ top:
 		}
 	}
 	if gp == nil {
+		// 从当前p的runq中取
 		gp, inheritTime = runqget(_g_.m.p.ptr())
 		// We can see gp != nil here even if the M is spinning,
 		// if checkTimers added a local goroutine via goready.
 	}
 	if gp == nil {
+		// 都没有，那就主动去找一个（再次从本地，全局，或者其他p偷一个）
+		// 该函数很复杂，不深究
 		gp, inheritTime = findrunnable() // blocks until work is available
 	}
 
@@ -3238,6 +3259,7 @@ top:
 		goto top
 	}
 
+	// 真正执行goroutine
 	execute(gp, inheritTime)
 }
 
@@ -4064,16 +4086,26 @@ func malg(stacksize int32) *g {
 // Create a new g running fn.
 // Put it on the queue of g's waiting to run.
 // The compiler turns a go statement into a call to this.
+
+// newproc goroutine的创建
 func newproc(fn *funcval) {
+
+	// 获取当前g，但我其实不是很理解，我现在就是要创建g啊，获取的又是什么g呢
+	// PS:我思考了一下，执行go func的时候，就是在一个主协程里面（main函数也是一个goroutine）
 	gp := getg()
+	// 获取程序计数器，counter
 	pc := getcallerpc()
 	systemstack(func() {
+		// 创建一个newg
 		newg := newproc1(fn, gp, pc)
 
+		// 拿到对应的P
 		_p_ := getg().m.p.ptr()
+		// 尝试把newg放进队列中
 		runqput(_p_, newg, true)
 
 		if mainStarted {
+			// 尝试性，找一个P去执行
 			wakep()
 		}
 	})
@@ -4082,6 +4114,8 @@ func newproc(fn *funcval) {
 // Create a new g in state _Grunnable, starting at fn. callerpc is the
 // address of the go statement that created this. The caller is responsible
 // for adding the new g to the scheduler.
+// newproc1 负责创建一个newg，但不负责加入调度
+// 外面调用它的人，需要add queue
 func newproc1(fn *funcval, callergp *g, callerpc uintptr) *g {
 	_g_ := getg()
 
@@ -4092,8 +4126,12 @@ func newproc1(fn *funcval, callergp *g, callerpc uintptr) *g {
 	acquirem() // disable preemption because it can be holding p in a local var
 
 	_p_ := _g_.m.p.ptr()
+
+	// 三种方式获取g
+	// 1）本地p的gfree 2）sched的gfree
 	newg := gfget(_p_)
 	if newg == nil {
+		// 3）创建一个
 		newg = malg(_StackMin)
 		casgstatus(newg, _Gidle, _Gdead)
 		allgadd(newg) // publishes with a g->status of Gdead so GC scanner doesn't look at uninitialized stack.
@@ -4106,6 +4144,8 @@ func newproc1(fn *funcval, callergp *g, callerpc uintptr) *g {
 		throw("newproc1: new g is not Gdead")
 	}
 
+	// 接下来一部分，把newg的属性，都准备好
+	// 变量等，都压进栈里???这个部分我没有找到，但是老版本是有的
 	totalSize := uintptr(4*goarch.PtrSize + sys.MinFrameSize) // extra space in case of reads slightly beyond frame
 	totalSize = alignUp(totalSize, sys.StackAlign)
 	sp := newg.stack.hi - totalSize
@@ -4117,6 +4157,7 @@ func newproc1(fn *funcval, callergp *g, callerpc uintptr) *g {
 		spArg += sys.MinFrameSize
 	}
 
+	// 设置newg的属性，状态等等
 	memclrNoHeapPointers(unsafe.Pointer(&newg.sched), unsafe.Sizeof(newg.sched))
 	newg.sched.sp = sp
 	newg.stktopsp = sp
@@ -4242,8 +4283,11 @@ func gfput(_p_ *p, gp *g) {
 
 // Get from gfree list.
 // If local list is empty, grab a batch from global list.
+// 获取现有的p
 func gfget(_p_ *p) *g {
 retry:
+	// 如果p的gfree为空，而sched不为空
+	// 那就从sched pop，补充到p，直到32个为止
 	if _p_.gFree.empty() && (!sched.gFree.stack.empty() || !sched.gFree.noStack.empty()) {
 		lock(&sched.gFree.lock)
 		// Move a batch of free Gs to the P.
@@ -4263,6 +4307,8 @@ retry:
 		unlock(&sched.gFree.lock)
 		goto retry
 	}
+	// 走出了上面的循环，如果p还是没有，说明sched也没有
+	// 直接返回nil
 	gp := _p_.gFree.pop()
 	if gp == nil {
 		return nil
@@ -5696,9 +5742,11 @@ func runqput(_p_ *p, gp *g, next bool) {
 		next = false
 	}
 
+	// 在这里尝试与runnext交换
 	if next {
 	retryNext:
 		oldnext := _p_.runnext
+		// 交换
 		if !_p_.runnext.cas(oldnext, guintptr(unsafe.Pointer(gp))) {
 			goto retryNext
 		}
@@ -5706,17 +5754,23 @@ func runqput(_p_ *p, gp *g, next bool) {
 			return
 		}
 		// Kick the old runnext out to the regular run queue.
+		// 拿出old备用
 		gp = oldnext.ptr()
 	}
 
 retry:
+	// 头下标
 	h := atomic.LoadAcq(&_p_.runqhead) // load-acquire, synchronize with consumers
+	// 尾下标
 	t := _p_.runqtail
+	// 如果尾减头小于长度，说明未满，直接加进去
 	if t-h < uint32(len(_p_.runq)) {
 		_p_.runq[t%uint32(len(_p_.runq))].set(gp)
 		atomic.StoreRel(&_p_.runqtail, t+1) // store-release, makes the item available for consumption
 		return
 	}
+	// 满了，将当前g（也就是被踢出来的oldnext）和runq中一部分元素，加入全局队列
+	// 由于全局队列有锁，所以是slow
 	if runqputslow(_p_, gp, h, t) {
 		return
 	}
@@ -5730,6 +5784,7 @@ func runqputslow(_p_ *p, gp *g, h, t uint32) bool {
 	var batch [len(_p_.runq)/2 + 1]*g
 
 	// First, grab a batch from local queue.
+	// 头减尾，取一半
 	n := t - h
 	n = n / 2
 	if n != uint32(len(_p_.runq)/2) {
@@ -5741,6 +5796,8 @@ func runqputslow(_p_ *p, gp *g, h, t uint32) bool {
 	if !atomic.CasRel(&_p_.runqhead, h, h+n) { // cas-release, commits consume
 		return false
 	}
+
+	// oldnext在最后面
 	batch[n] = gp
 
 	if randomizeScheduler {
